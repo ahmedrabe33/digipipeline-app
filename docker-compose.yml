@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  frontend:
+    build: ./services/frontend
+    ports: ["3000:3000"]
+    environment:
+      - REACT_APP_GATEWAY_URL=http://localhost:8080
+
+  admin:
+    build: ./services/admin
+    ports: ["3001:3001"]
+
+  gateway:
+    build: ./services/gateway
+    ports: ["8080:8080"]
+
+  user-auth:
+    build: ./services/user-auth
+    ports: ["8081:8081"]
+
+  catalog:
+    build: ./services/catalog
+    ports: ["8082:8082"]
+
+  order-payment:
+    build: ./services/order-payment
+    ports: ["8083:8083"]
+
+  fulfillment:
+    build: ./services/fulfillment
+    ports: ["8084:8084"]
+
+  shopping:
+    build: ./services/shopping
+    ports: ["8085:8085"]
+
+  platform:
+    build: ./services/platform
+    ports: ["8086:8086"]
+
+  inventory:
+    build: ./services/inventory
+    ports: ["8087:8087"]
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: digipipeline
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: digipipeline
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports: ["15672:15672"]
+
+volumes:
+  pg_data:

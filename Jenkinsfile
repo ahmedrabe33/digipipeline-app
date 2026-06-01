@@ -67,7 +67,7 @@ pipeline {
         GITOPS_BRANCH = 'main'
 
         // عدل المسار ده لو ملف kustomization عندك في مكان مختلف
-        GITOPS_KUSTOMIZATION_FILE = 'apps/fullstack/overlays/dev/kustomization.yaml'
+        GITOPS_KUSTOMIZATION_FILE = 'k8s/overlays/development/kustomization.yaml'
 
         TRIVY_SEVERITY = 'HIGH,CRITICAL'
     }

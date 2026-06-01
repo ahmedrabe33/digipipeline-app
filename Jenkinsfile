@@ -1,6 +1,3 @@
-cd ~/digipipeline-workspace/digipipeline-app
-
-cat > Jenkinsfile <<'EOF'
 pipeline {
     agent { label 'linux' }
 
@@ -515,4 +512,3 @@ PY
         }
     }
 }
-EOF

@@ -5,7 +5,7 @@
 
 ---
 
-## What is AuraWeb?
+### What is AuraWeb?
 
 AuraWeb is a full-stack e-commerce platform built as a set of independent microservices.  
 Customers browse products, manage carts, and place orders through a React storefront.  

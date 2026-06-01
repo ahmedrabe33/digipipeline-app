@@ -1,7 +1,11 @@
+cd ~/digipipeline-workspace/digipipeline-app
+
+cat > Jenkinsfile <<'EOF'
 pipeline {
     agent { label 'linux' }
 
     options {
+        skipDefaultCheckout(true)
         timestamps()
         disableConcurrentBuilds()
     }
@@ -16,7 +20,7 @@ pipeline {
         booleanParam(
             name: 'RUN_QUALITY_GATE',
             defaultValue: false,
-            description: 'Run SonarQube Quality Gate. Keep false unless webhook is configured.'
+            description: 'Run SonarQube Quality Gate only if webhook is configured.'
         )
 
         booleanParam(
@@ -39,33 +43,31 @@ pipeline {
     }
 
     environment {
-        // Architecture:
         // Jenkins controller/agents are in us-west-2
         // EKS + ECR are in us-east-1
         AWS_REGION = 'us-east-1'
 
         IMAGE_TAG_PREFIX = 'build'
 
-        // Services from AuraWeb app
-        SERVICES_DEFAULT = 'gateway frontend admin catalog inventory shopping order-payment fulfillment user-auth platform'
+        SERVICES_DEFAULT = 'frontend admin gateway catalog inventory shopping order-payment fulfillment user-auth platform'
 
-        // ECR repo naming
+        // ECR repo names:
+        // auraweb-frontend
+        // auraweb-admin
+        // auraweb-gateway
         ECR_REPO_PREFIX = 'auraweb'
 
-        // Jenkins credentials and configs from your first Jenkinsfile
         GITHUB_CRED_ID = 'github-pat-creds'
 
         SONARQUBE_SERVER = 'sonarqube'
         SONAR_PROJECT_KEY = 'auraweb'
         SONAR_PROJECT_NAME = 'AuraWeb Platform'
 
-        // GitOps repo from your project
         GITOPS_REPO = 'github.com/ahmedrabe33/digipipeline-gitops.git'
         GITOPS_BRANCH = 'main'
 
-        // Expected GitOps structure
-        // Example: k8s/base/frontend-deployment.yaml
-        GITOPS_DEPLOYMENT_DIR = 'k8s/base'
+        // عدل المسار ده لو ملف kustomization عندك في مكان مختلف
+        GITOPS_KUSTOMIZATION_FILE = 'apps/fullstack/overlays/dev/kustomization.yaml'
 
         TRIVY_SEVERITY = 'HIGH,CRITICAL'
     }
@@ -73,6 +75,9 @@ pipeline {
     stages {
         stage('Checkout App Repo') {
             steps {
+                sh '''
+                  rm -rf gitops-tmp .scannerwork || true
+                '''
                 checkout scm
             }
         }
@@ -177,12 +182,15 @@ pipeline {
                       echo "SonarQube URL: $SONAR_HOST_URL"
 
                       rm -rf .scannerwork
+                      mkdir -p .scannerwork
 
                       docker run --rm \
+                        -u "$(id -u):$(id -g)" \
                         -v "$PWD:/usr/src" \
                         -w /usr/src \
                         -e SONAR_HOST_URL="$SONAR_HOST_URL" \
                         -e SONAR_TOKEN="$SONAR_AUTH_TOKEN" \
+                        -e SONAR_USER_HOME="/tmp/.sonar" \
                         sonarsource/sonar-scanner-cli:latest \
                         sonar-scanner \
                           -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
@@ -224,6 +232,7 @@ pipeline {
                   fi
 
                   trivy fs \
+                    --scanners vuln \
                     --severity "$TRIVY_SEVERITY" \
                     --exit-code "$EXIT_CODE" \
                     --no-progress \
@@ -281,9 +290,12 @@ pipeline {
                           echo "Image: \$IMAGE_TAGGED"
 
                           docker build \
+                            -f "services/${svc}/Dockerfile" \
                             -t "\$IMAGE_TAGGED" \
                             -t "\$IMAGE_LATEST" \
                             "services/${svc}"
+
+                          docker images | grep "${env.ECR_REPO_PREFIX}-${svc}" || true
                         """
                     }
                 }
@@ -314,6 +326,7 @@ pipeline {
                           echo "Scanning image: \$IMAGE"
 
                           trivy image \
+                            --scanners vuln \
                             --severity "${env.TRIVY_SEVERITY}" \
                             --exit-code "\$EXIT_CODE" \
                             --no-progress \
@@ -366,75 +379,98 @@ pipeline {
                       cd gitops-tmp
                       git checkout "$GITOPS_BRANCH"
 
-                      if [ ! -d "$GITOPS_DEPLOYMENT_DIR" ]; then
-                        echo "ERROR: GitOps deployment directory not found: $GITOPS_DEPLOYMENT_DIR"
-                        echo "Repo tree:"
-                        find . -maxdepth 4 -type f | sort
+                      if [ ! -f "$GITOPS_KUSTOMIZATION_FILE" ]; then
+                        echo "ERROR: kustomization file not found: $GITOPS_KUSTOMIZATION_FILE"
+                        echo "Trying to find it..."
+                        find . -name kustomization.yaml -print
                         exit 1
                       fi
 
-                      echo "Updating GitOps manifests in: $GITOPS_DEPLOYMENT_DIR"
+                      echo "Updating GitOps kustomization:"
+                      echo "$GITOPS_KUSTOMIZATION_FILE"
+
+                      echo "Before:"
+                      cat "$GITOPS_KUSTOMIZATION_FILE"
 
                       python3 - <<'PY'
 import os
-import re
 import sys
+import yaml
 from pathlib import Path
 
 services = os.environ["BUILD_SERVICES"].split()
 ecr_base = os.environ["ECR_BASE"]
 repo_prefix = os.environ["ECR_REPO_PREFIX"]
 image_tag = os.environ["IMAGE_TAG"]
-deployment_dir = Path(os.environ["GITOPS_DEPLOYMENT_DIR"])
+file_path = Path(os.environ["GITOPS_KUSTOMIZATION_FILE"])
 
-missing = []
-updated_files = []
-
-for svc in services:
-    image_name = f"{repo_prefix}-{svc}"
-    new_image = f"{ecr_base}/{image_name}:{image_tag}"
-
-    file_path = deployment_dir / f"{svc}-deployment.yaml"
-
-    if not file_path.exists():
-        missing.append(str(file_path))
-        continue
-
-    text = file_path.read_text()
-
-    pattern = re.compile(
-        rf'(^\\s*image:\\s*)(["\\']?)(\\S*{re.escape(image_name)})(?::[^\\s"\\']+)?(["\\']?)\\s*$',
-        re.MULTILINE
-    )
-
-    new_text, count = pattern.subn(rf'\\1{new_image}', text)
-
-    if count == 0:
-        # fallback: update first image line in this deployment
-        fallback = re.compile(r'(^\\s*image:\\s*)(["\\']?)(\\S+)(["\\']?)\\s*$', re.MULTILINE)
-        new_text, count = fallback.subn(rf'\\1{new_image}', text, count=1)
-
-    if count == 0:
-        print(f"ERROR: No image line found in {file_path}")
-        sys.exit(1)
-
-    file_path.write_text(new_text)
-    updated_files.append(str(file_path))
-    print(f"Updated {file_path} -> {new_image}")
-
-if missing:
-    print("ERROR: Missing deployment files:")
-    for item in missing:
-        print(f" - {item}")
-    print("\\nRepo files:")
-    for p in sorted(Path(".").rglob("*.yaml")):
-        print(f" - {p}")
+if not file_path.exists():
+    print(f"ERROR: File not found: {file_path}")
     sys.exit(1)
 
-print("\\nUpdated files:")
-for item in updated_files:
-    print(f" - {item}")
+data = yaml.safe_load(file_path.read_text())
+
+if not isinstance(data, dict):
+    print("ERROR: Invalid kustomization.yaml")
+    sys.exit(1)
+
+existing_images = data.get("images", [])
+
+if existing_images is None:
+    existing_images = []
+
+if not isinstance(existing_images, list):
+    print("ERROR: images must be a list")
+    sys.exit(1)
+
+images_by_name = {}
+
+for item in existing_images:
+    if isinstance(item, dict) and "name" in item:
+        images_by_name[item["name"]] = item
+
+for svc in services:
+    repo_name = f"{repo_prefix}-{svc}"
+    new_name = f"{ecr_base}/{repo_name}"
+
+    if svc not in images_by_name:
+        images_by_name[svc] = {"name": svc}
+
+    images_by_name[svc]["newName"] = new_name
+    images_by_name[svc]["newTag"] = image_tag
+
+final_images = []
+
+# preserve original order
+for item in existing_images:
+    if isinstance(item, dict) and "name" in item:
+        name = item["name"]
+        if name in images_by_name:
+            final_images.append(images_by_name.pop(name))
+
+# append missing services
+for svc in services:
+    if svc in images_by_name:
+        final_images.append(images_by_name.pop(svc))
+
+# keep any unrelated images
+for _, item in images_by_name.items():
+    final_images.append(item)
+
+data["images"] = final_images
+
+# dump without sorting keys
+file_path.write_text(
+    yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+)
+
+print("Updated images:")
+for svc in services:
+    print(f" - {svc}: {ecr_base}/{repo_prefix}-{svc}:{image_tag}")
 PY
+
+                      echo "After:"
+                      cat "$GITOPS_KUSTOMIZATION_FILE"
 
                       echo "Git diff:"
                       git diff
@@ -442,7 +478,7 @@ PY
                       git config user.email "jenkins@digipipeline.local"
                       git config user.name "Jenkins CI"
 
-                      git add "$GITOPS_DEPLOYMENT_DIR"
+                      git add "$GITOPS_KUSTOMIZATION_FILE"
 
                       if git diff --cached --quiet; then
                         echo "No GitOps changes to commit."
@@ -479,4 +515,4 @@ PY
         }
     }
 }
-
+EOF

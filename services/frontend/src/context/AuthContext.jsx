@@ -8,8 +8,8 @@ export const AuthProvider = ({ children }) => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        // Check if user is logged in on mount
         const token = localStorage.getItem('accessToken');
+
         if (token) {
             fetchUser();
         } else {
@@ -17,14 +17,49 @@ export const AuthProvider = ({ children }) => {
         }
     }, []);
 
+    const extractUser = (responseData) => {
+        return (
+            responseData?.user ||
+            responseData?.data?.user ||
+            responseData?.data ||
+            null
+        );
+    };
+
+    const extractToken = (responseData) => {
+        return (
+            responseData?.accessToken ||
+            responseData?.token ||
+            responseData?.data?.accessToken ||
+            responseData?.data?.token ||
+            null
+        );
+    };
+
+    const extractRefreshToken = (responseData, fallbackToken) => {
+        return (
+            responseData?.refreshToken ||
+            responseData?.data?.refreshToken ||
+            fallbackToken ||
+            null
+        );
+    };
+
     const fetchUser = async () => {
         try {
             const response = await authAPI.me();
-            setUser(response.data.data);
+            const currentUser = extractUser(response.data);
+
+            if (!currentUser) {
+                throw new Error('No user returned from /me');
+            }
+
+            setUser(currentUser);
         } catch (error) {
             console.error('Failed to fetch user:', error);
             localStorage.removeItem('accessToken');
             localStorage.removeItem('refreshToken');
+            setUser(null);
         } finally {
             setLoading(false);
         }
@@ -32,32 +67,49 @@ export const AuthProvider = ({ children }) => {
 
     const login = async (email, password) => {
         const response = await authAPI.login({ email, password });
-        const { user, token } = response.data;
-        const accessToken = token;
-        const refreshToken = token; // Temporary fallback as backend doesn't send refresh token yet
+
+        const accessToken = extractToken(response.data);
+        const refreshToken = extractRefreshToken(response.data, accessToken);
+        const loggedInUser = extractUser(response.data);
+
+        if (!accessToken) {
+            throw new Error('Login succeeded but no token returned');
+        }
 
         localStorage.setItem('accessToken', accessToken);
         localStorage.setItem('refreshToken', refreshToken);
-        setUser(user);
 
-        return user;
+        setUser(loggedInUser);
+
+        return loggedInUser;
     };
 
     const signup = async (email, password, firstName, lastName) => {
-        const response = await authAPI.signup({ email, password, firstName, lastName });
-        const { user, accessToken, refreshToken } = response.data.data;
+        const response = await authAPI.signup({
+            email,
+            password,
+            firstName,
+            lastName
+        });
 
-        localStorage.setItem('accessToken', accessToken);
-        localStorage.setItem('refreshToken', refreshToken);
-        setUser(user);
+        const accessToken = extractToken(response.data);
+        const refreshToken = extractRefreshToken(response.data, accessToken);
+        const signedUpUser = extractUser(response.data);
 
-        return user;
+        if (accessToken) {
+            localStorage.setItem('accessToken', accessToken);
+            localStorage.setItem('refreshToken', refreshToken);
+            setUser(signedUpUser);
+        }
+
+        return signedUpUser;
     };
 
     const logout = async () => {
         try {
             const refreshToken = localStorage.getItem('refreshToken');
-            if (refreshToken) {
+
+            if (refreshToken && authAPI.logout) {
                 await authAPI.logout(refreshToken);
             }
         } catch (error) {
@@ -78,13 +130,19 @@ export const AuthProvider = ({ children }) => {
         isAuthenticated: !!user
     };
 
-    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+    return (
+        <AuthContext.Provider value={value}>
+            {children}
+        </AuthContext.Provider>
+    );
 };
 
 export const useAuth = () => {
     const context = useContext(AuthContext);
+
     if (!context) {
         throw new Error('useAuth must be used within AuthProvider');
     }
+
     return context;
 };

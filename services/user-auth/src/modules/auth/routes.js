@@ -58,27 +58,60 @@ router.post('/login', async (req, res) => {
 
 // GET /api/auth/me
 router.get('/me', async (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-        const result = await pool.query('SELECT id, email, first_name, last_name, role FROM users WHERE id = $1', [decoded.userId]);
+        const authHeader = req.headers.authorization || '';
+
+        const token = authHeader.startsWith('Bearer ')
+            ? authHeader.slice(7)
+            : authHeader;
+
+        if (!token) {
+            return res.status(401).json({ error: 'No token provided' });
+        }
+
+        const decoded = jwt.verify(
+            token,
+            process.env.JWT_SECRET || 'dev-jwt-secret-123456'
+        );
+
+        const userId = decoded.userId || decoded.id;
+
+        if (!userId) {
+            return res.status(401).json({ error: 'Invalid token payload' });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT id, email, name, created_at
+            FROM users
+            WHERE id = $1
+            `,
+            [userId]
+        );
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const user = result.rows[0];
+        const user = {
+            id: result.rows[0].id,
+            email: result.rows[0].email,
+            name: result.rows[0].name || null,
+            firstName: '',
+            lastName: '',
+            role: 'user',
+            isActive: true,
+            createdAt: result.rows[0].created_at
+        };
+
         res.json({
-            user: {
-                id: user.id,
-                email: user.email,
-                name: `${user.first_name} ${user.last_name}`,
-                role: user.role
-            }
+            success: true,
+            data: user,
+            user
         });
     } catch (err) {
+        console.error('[AUTH] /me error:', err.message);
+        logger.error('Error fetching current user', err);
         res.status(401).json({ error: 'Invalid token' });
     }
 });

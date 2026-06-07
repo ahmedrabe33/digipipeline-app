@@ -48,7 +48,7 @@ router.post('/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'secret', { expiresIn: '1h' });
+        const token = jwt.sign({ userId: user.id, id: user.id, email: user.email, role: user.role || 'user' }, process.env.JWT_SECRET || 'dev-jwt-secret-123456', { expiresIn: '1h' });
         res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
     } catch (err) {
         logger.error('Error logging in', err);
@@ -74,9 +74,12 @@ router.get('/me', async (req, res) => {
             process.env.JWT_SECRET || 'dev-jwt-secret-123456'
         );
 
-        const userId = decoded.userId || decoded.id;
+        console.log('[AUTH] /me decoded payload:', decoded);
+
+        const userId = decoded.userId || decoded.id || decoded.sub;
 
         if (!userId) {
+            console.error('[AUTH] /me invalid token payload:', decoded);
             return res.status(401).json({ error: 'Invalid token payload' });
         }
 
@@ -104,7 +107,7 @@ router.get('/me', async (req, res) => {
             createdAt: result.rows[0].created_at
         };
 
-        res.json({
+        return res.json({
             success: true,
             data: user,
             user
@@ -112,8 +115,9 @@ router.get('/me', async (req, res) => {
     } catch (err) {
         console.error('[AUTH] /me error:', err.message);
         logger.error('Error fetching current user', err);
-        res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ error: 'Invalid token' });
     }
 });
+
 
 module.exports = router;

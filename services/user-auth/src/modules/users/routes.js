@@ -1,73 +1,166 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
 const pool = require('../../lib/db');
 const logger = require('../../lib/logger');
 
-// GET /api/users - List all users
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-jwt-secret-123456';
+
+const extractToken = (req) => {
+    const authHeader = req.headers.authorization || '';
+
+    if (authHeader.startsWith('Bearer ')) {
+        return authHeader.slice(7);
+    }
+
+    return authHeader;
+};
+
+const authenticate = (req, res, next) => {
+    try {
+        const token = extractToken(req);
+
+        if (!token) {
+            return res.status(401).json({ error: 'No token provided' });
+        }
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        req.user = {
+            id: decoded.userId || decoded.id,
+            email: decoded.email,
+            role: decoded.role || 'user'
+        };
+
+        if (!req.user.id) {
+            return res.status(401).json({ error: 'Invalid token payload' });
+        }
+
+        next();
+    } catch (err) {
+        console.error('[USERS] Auth error:', err.message);
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+};
+
+const splitName = (name) => {
+    const safeName = name || '';
+    const parts = safeName.trim().split(/\s+/).filter(Boolean);
+
+    return {
+        firstName: parts[0] || '',
+        lastName: parts.slice(1).join(' ') || ''
+    };
+};
+
+const formatUser = (user) => {
+    const names = splitName(user.name);
+
+    return {
+        id: user.id,
+        email: user.email,
+        name: user.name || null,
+        firstName: names.firstName,
+        lastName: names.lastName,
+        role: 'user',
+        isActive: true,
+        createdAt: user.created_at
+    };
+};
+
+// GET /api/users
 router.get('/', async (req, res) => {
     try {
-        const result = await pool.query('SELECT id, email, first_name, last_name, role, created_at FROM users ORDER BY created_at DESC');
-        // Return structure matching Admin App expectation: { data: { users: [...] } }
-        // Admin client calls: na.getUsers()
-        // Client.js: getUsers: (params) => api.get('/admin/users', { params })
-        // Standard in this app seems to be res.json(data) or res.json({ data: ... })
-        // Let's look at auth response: res.json({ token, user: ... })
-        // Admin code: (await na.getUsers()).data.data.users
-        // So Axios response.data = { data: { users: [...] } }
-        // So we must return { data: { users: [...] } }
+        const result = await pool.query(
+            `
+            SELECT id, email, name, created_at
+            FROM users
+            ORDER BY created_at DESC
+            `
+        );
 
-        // Map fields to match Frontend expectation (firstName, lastName)
-        const users = result.rows.map(u => ({
-            id: u.id,
-            email: u.email,
-            firstName: u.first_name,
-            lastName: u.last_name,
-            role: u.role,
-            isActive: true, // Defaulting for now
-            createdAt: u.created_at
-        }));
+        const users = result.rows.map(formatUser);
 
-        res.json({ data: { users } });
+        res.json({
+            success: true,
+            data: {
+                users
+            }
+        });
     } catch (err) {
+        console.error('[USERS] List users error:', err.message);
         logger.error('Error fetching users', err);
         res.status(500).json({ error: 'Failed to fetch users' });
     }
 });
 
 // GET /api/users/profile
-router.get('/profile', async (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
+router.get('/profile', authenticate, async (req, res) => {
     try {
-        const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'secret');
-        const result = await pool.query('SELECT id, email, first_name, last_name, role, created_at FROM users WHERE id = $1', [decoded.userId]);
+        console.log('[USERS] Profile request userId:', req.user.id);
+
+        const result = await pool.query(
+            `
+            SELECT id, email, name, created_at
+            FROM users
+            WHERE id = $1
+            `,
+            [req.user.id]
+        );
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
-        res.json({ data: result.rows[0] });
+
+        const user = formatUser(result.rows[0]);
+
+        res.json({
+            success: true,
+            data: user,
+            user
+        });
     } catch (err) {
+        console.error('[USERS] Profile error:', err.message);
         logger.error('Error fetching profile', err);
-        res.status(401).json({ error: 'Invalid token' });
+        res.status(500).json({ error: 'Failed to fetch profile' });
     }
 });
 
 // PUT /api/users/profile
-router.put('/profile', async (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
-    const { firstName, lastName } = req.body;
-
+router.put('/profile', authenticate, async (req, res) => {
     try {
-        const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'secret');
+        const { name, firstName, lastName } = req.body;
+
+        const displayName =
+            name ||
+            [firstName, lastName].filter(Boolean).join(' ') ||
+            null;
+
         const result = await pool.query(
-            'UPDATE users SET first_name = $1, last_name = $2 WHERE id = $3 RETURNING id, email, first_name, last_name, role',
-            [firstName, lastName, decoded.userId]
+            `
+            UPDATE users
+            SET name = $1
+            WHERE id = $2
+            RETURNING id, email, name, created_at
+            `,
+            [displayName, req.user.id]
         );
-        res.json({ data: result.rows[0] });
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const user = formatUser(result.rows[0]);
+
+        res.json({
+            success: true,
+            data: user,
+            user
+        });
     } catch (err) {
+        console.error('[USERS] Update profile error:', err.message);
         logger.error('Error updating profile', err);
         res.status(500).json({ error: 'Failed to update profile' });
     }
@@ -77,112 +170,140 @@ router.put('/profile', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+
+        const result = await pool.query(
+            `
+            SELECT id, email, name, created_at
+            FROM users
+            WHERE id = $1
+            `,
+            [id]
+        );
+
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
-        const u = result.rows[0];
-        const user = {
-            id: u.id,
-            email: u.email,
-            firstName: u.first_name,
-            lastName: u.last_name,
-            role: u.role,
-            createdAt: u.created_at
-        };
-        res.json({ data: user });
+
+        const user = formatUser(result.rows[0]);
+
+        res.json({
+            success: true,
+            data: user,
+            user
+        });
     } catch (err) {
+        console.error('[USERS] Get user error:', err.message);
         logger.error('Error fetching user', err);
         res.status(500).json({ error: 'Failed to fetch user' });
     }
 });
 
-// POST /api/users - Create user (Admin)
+// POST /api/users
 router.post('/', async (req, res) => {
-    const { email, password, firstName, lastName, role } = req.body;
+    const { email, password, name, firstName, lastName } = req.body;
 
-    if (!email || !password || !firstName || !lastName || !role) {
-        return res.status(400).json({ error: 'All fields are required' });
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
     }
 
     try {
-        const hashedPassword = await require('bcryptjs').hash(password, 10);
+        const displayName =
+            name ||
+            [firstName, lastName].filter(Boolean).join(' ') ||
+            null;
+
+        const hashedPassword = await bcrypt.hash(password, 10);
 
         const result = await pool.query(
-            'INSERT INTO users (email, password_hash, first_name, last_name, role, created_at) VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id, email, first_name, last_name, role, created_at',
-            [email, hashedPassword, firstName, lastName, role]
+            `
+            INSERT INTO users (email, password_hash, name, created_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING id, email, name, created_at
+            `,
+            [email.toLowerCase(), hashedPassword, displayName]
         );
 
-        res.status(201).json({ data: result.rows[0] });
+        const user = formatUser(result.rows[0]);
+
+        res.status(201).json({
+            success: true,
+            data: user,
+            user
+        });
     } catch (err) {
+        console.error('[USERS] Create user error:', err.message);
         logger.error('Error creating user', err);
-        if (err.code === '23505') { // Unique violation
+
+        if (err.code === '23505') {
             return res.status(409).json({ error: 'Email already exists' });
         }
+
         res.status(500).json({ error: 'Failed to create user' });
     }
 });
 
-// PUT /api/users/:id (Update User)
+// PUT /api/users/:id
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
-    const { firstName, lastName, email, role } = req.body;
+    const { email, name, firstName, lastName } = req.body;
 
     try {
+        const displayName =
+            name ||
+            [firstName, lastName].filter(Boolean).join(' ') ||
+            null;
+
         const result = await pool.query(
-            'UPDATE users SET first_name = $1, last_name = $2, email = $3, role = $4 WHERE id = $5 RETURNING *',
-            [firstName, lastName, email, role, id]
+            `
+            UPDATE users
+            SET email = COALESCE($1, email),
+                name = COALESCE($2, name)
+            WHERE id = $3
+            RETURNING id, email, name, created_at
+            `,
+            [email ? email.toLowerCase() : null, displayName, id]
         );
 
-        if (result.rowCount === 0) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        res.json({ data: result.rows[0] });
+        const user = formatUser(result.rows[0]);
+
+        res.json({
+            success: true,
+            data: user,
+            user
+        });
     } catch (err) {
+        console.error('[USERS] Update user error:', err.message);
         logger.error('Error updating user', err);
         res.status(500).json({ error: 'Failed to update user' });
     }
 });
 
-// PUT /api/users/:id/status (Toggle Status)
-router.put('/:id/status', async (req, res) => {
-    const { id } = req.params;
+// DELETE /api/users/:id
+router.delete('/:id', async (req, res) => {
     try {
-        // Toggle is_active
+        const { id } = req.params;
+
         const result = await pool.query(
-            'UPDATE users SET is_active = NOT is_active WHERE id = $1 RETURNING id, is_active',
+            'DELETE FROM users WHERE id = $1 RETURNING id',
             [id]
         );
 
-        if (result.rowCount === 0) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        res.json({ data: result.rows[0] });
+        res.json({
+            success: true,
+            message: 'User deleted successfully'
+        });
     } catch (err) {
-        logger.error('Error toggling user status', err);
-        res.status(500).json({ error: 'Failed to toggle status' });
-    }
-});
-
-// DELETE /api/users/:id
-router.delete('/:id', async (req, res) => {
-    const { id } = req.params;
-    try {
-        const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING *', [id]);
-
-        if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Publish Event
-        // const channel = getChannel(); ... (if needed)
-
-        res.status(200).json({ message: 'User deleted', user: result.rows[0] });
-    } catch (err) {
+        console.error('[USERS] Delete user error:', err.message);
         logger.error('Error deleting user', err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        res.status(500).json({ error: 'Failed to delete user' });
     }
 });
 

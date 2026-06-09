@@ -1,4 +1,3 @@
-```js
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
@@ -19,7 +18,7 @@ const registerHandler = async (req, res) => {
 
         const fullName =
             name ||
-            `${firstName || ''} ${lastName || ''}`.trim() ||
+            [firstName, lastName].filter(Boolean).join(' ') ||
             email.split('@')[0];
 
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -35,7 +34,6 @@ const registerHandler = async (req, res) => {
 
         const user = result.rows[0];
 
-        // Publish event to RabbitMQ without failing registration
         try {
             const channel = getChannel();
 
@@ -46,15 +44,10 @@ const registerHandler = async (req, res) => {
                     { persistent: true }
                 );
             } else {
-                console.warn(
-                    'RabbitMQ channel is not available. User registration succeeded without publishing event.'
-                );
+                console.warn('RabbitMQ channel is not available. User registration succeeded without publishing event.');
             }
         } catch (mqError) {
-            console.warn(
-                'RabbitMQ publish failed, but user registration succeeded:',
-                mqError.message
-            );
+            console.warn('RabbitMQ publish failed, but user registration succeeded:', mqError.message);
         }
 
         return res.status(201).json(user);
@@ -178,4 +171,3 @@ router.get('/me', async (req, res) => {
 });
 
 module.exports = router;
-```
